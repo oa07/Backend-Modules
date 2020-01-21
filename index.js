@@ -1,7 +1,7 @@
 const mongoose = require('mongoose');
 const config = require('./config/config');
 const app = require('./config/express');
-const logger = require('./config/logger');
+const logger = require('./config/logger')(module);
 
 mongoose.connect(
   config.mongodbHost,

@@ -15,13 +15,13 @@ exports.verifyToken = asyncHandler(async (req, res, next) => {
     try {
       const isBlackListed = await redis.get(`BlackListed${accessToken}`);
       if (isBlackListed) {
-        return next(new ErrorResponse('This Token is already used', 403));
+        return next(new ErrorResponse('Access token is invalid', 401));
       }
       const decoded = await jwt.verify(accessToken, config.jwtAccessKey);
+
       const user = await AuthModel.findById(decoded.id);
       if (!user) return next(new ErrorResponse('User not found', 404));
 
-      req.accessToken = accessToken;
       req.user = user;
       next();
     } catch (err) {

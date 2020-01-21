@@ -87,23 +87,6 @@ exports.currentUser = asyncHandler(async (req, res, next) => {
   return res.status(200).json({ success: true, user: req.user });
 });
 
-// exports.verifyAccountSendToken = asyncHandler(async (req, res, next) => {
-//   const user = await AuthModel.findById(req.body.userID);
-
-//   if (user.isAccountVerified)
-//     return next(new ErrorResponse('Account is already verified', 400));
-
-//   const token = crypto.randomBytes(20).toString('hex');
-//   const verifyToken = crypto
-//     .createHash('sha256')
-//     .update(token)
-//     .digest('hex');
-//   user.verifyAccountToken = verifyToken;
-//   await user.save();
-//   await sendMailVerifyAccount(user.username, user.email, verifyToken);
-//   return res.status(200).json({ success: true, verifyToken });
-// });
-
 exports.verifyAccountReceiveToken = asyncHandler(async (req, res, next) => {
   const { token } = req.params;
   const user = await AuthModel.findOne({
@@ -211,15 +194,20 @@ exports.deleteAccount = asyncHandler(async (req, res, next) => {
 
 exports.tokenRefresher = asyncHandler(async (req, res, next) => {
   const refreshToken = req.body.refreshToken;
+  const accessToken = req.body.accessToken;
 
   try {
-    const isBlackListed = await redis.get(`BlackListed${refreshToken}`);
+    let isBlackListed;
+    isBlackListed = await redis.get(`BlackListed${accessToken}`);
     if (isBlackListed) {
-      return next(new ErrorResponse('This Token is already used', 403));
+      return next(new ErrorResponse('Access Token is invalid', 401));
     }
-    const decoded = await jwt.verify(refreshToken, config.jwtRefreshKey);
-    const user = await AuthModel.findById(decoded.id);
-    if (!user) return next(new ErrorResponse('User not found', 404));
+
+    isBlackListed = await redis.get(`BlackListed${refreshToken}`);
+    if (isBlackListed) {
+      return next(new ErrorResponse('Refresh Token is invalid', 401));
+    }
+    const user = await jwt.verify(refreshToken, config.jwtRefreshKey);
 
     const accessToken = await jwt.sign(
       { id: user._id, username: user.username },
@@ -237,11 +225,15 @@ exports.tokenRefresher = asyncHandler(async (req, res, next) => {
 
 exports.logout = asyncHandler(async (req, res, next) => {
   const { refreshToken } = req.body;
-  const { accessToken } = req;
-  if (!refreshToken)
-    return next(new ErrorResponse('Refresh Token not found!! ', 404));
-
-  await redis.set(`BlackListed${refreshToken}`, accessToken, 'EX', 30 * 60);
-  await redis.set(`BlackListed${accessToken}`, refreshToken, 'EX', 24 * 3600);
+  const { accessToken } = req.body;
+  if (!refreshToken || !accessToken) {
+    return next(new ErrorResponse('Both tokens must be present!!', 404));
+  }
+  const decodedAT = await jwt.verify(accessToken, config.jwtAccessKey);
+  const decodedRT = await jwt.verify(refreshToken, config.jwtRefreshKey);
+  const timeAT = decodedAT.exp * 1000 - Date.now() + 1;
+  const timeRT = decodedRT.exp * 1000 - Date.now() + 1;
+  await redis.set(`BlackListed${refreshToken}`, accessToken, 'PX', timeAT);
+  await redis.set(`BlackListed${accessToken}`, refreshToken, 'PX', timeRT);
   return res.status(200).json({ success: true });
 });
