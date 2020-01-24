@@ -1,10 +1,10 @@
 const ErrorResponse = require('../utils/errorResponse');
-const logger = require('../../config/logger');
+const logger = require('../../config/logger')(module);
 
 const errorHandler = (err, req, res, next) => {
   let error = { ...err };
   error.message = err.message; // confused. It works when ID is invalid
-  logger.error(error);
+  logger.error(new Error(error.message));
 
   // Mongoose duplicate key
   if (err.code === 11000) {

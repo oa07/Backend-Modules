@@ -1,9 +1,9 @@
+const logger = require('../../config/logger')(module);
 const bcrypt = require('bcrypt');
 const crypto = require('crypto');
 const jwt = require('jsonwebtoken');
 const { AuthModel } = require('./auth.model');
 const config = require('../../config/config');
-const logger = require('../../config/logger');
 
 const {
   sendMailForgetPasswordToken,
@@ -25,6 +25,7 @@ const redis = require('../../index.redis');
 exports.register = asyncHandler(async (req, res, next) => {
   const { error } = registerVal(req.body);
   if (error) return next(new ErrorResponse(error.details[0].message, 400));
+
   const { username, email, password, phoneNumber, role } = req.body;
   const hashedPassword = await bcrypt.hash(password, 10);
   const user = new AuthModel({
@@ -40,10 +41,11 @@ exports.register = asyncHandler(async (req, res, next) => {
     .createHash('sha256')
     .update(token)
     .digest('hex');
-  user.verifyAccountToken = verifyToken;
-  await sendMailVerifyAccount(user.username, user.email, verifyToken);
 
+  await sendMailVerifyAccount(user.username, user.email, verifyToken);
   await user.save();
+  await redis.set(`VA${refreshToken}`, user._id, 'PX', 30 * 60 * 1000);
+
   return res.status(201).json({ success: true });
 });
 
@@ -88,13 +90,12 @@ exports.currentUser = asyncHandler(async (req, res, next) => {
 });
 
 exports.verifyAccountReceiveToken = asyncHandler(async (req, res, next) => {
-  const { token } = req.params;
-  const user = await AuthModel.findOne({
-    verifyAccountToken: token
-  });
+  const userID = await redis.get(`VA${req.params.token}`);
+  if (!userID) return next(new ErrorResponse('Token is not valid', 401));
+  const user = await AuthModel.findById(userID);
   if (!user) return next(new ErrorResponse('User not found', 404));
-  user.verifyAccountToken = undefined;
   user.isAccountVerified = true;
+  await redis.del(`VA${req.params.token}`);
   await user.save();
   return res.status(200).json({ success: true });
 });
@@ -112,40 +113,47 @@ exports.forgetPasswordSendToken = asyncHandler(async (req, res, next) => {
     .createHash('sha256')
     .update(resetToken)
     .digest('hex');
-  user.resetPasswordToken = token;
-  user.resetPasswordExpire = Date.now() + 10 * 60 * 1000;
 
+  // Reset password
+  await redis.set(`RP${token}`, user._id, 'PX', 30 * 60 * 1000);
   await user.save();
   await sendMailForgetPasswordToken(user.username, user.email, token);
+
   return res.status(200).json({ success: true, token });
 });
 
 exports.forgetPasswordRecieveToken = asyncHandler(async (req, res, next) => {
-  const { token } = req.params;
-  const user = await AuthModel.findOne({
-    resetPasswordToken: token,
-    resetPasswordExpire: { $gt: Date.now() }
-  });
-  if (!user) return next(new ErrorResponse('Token Expired !!', 401));
+  const userID = await redis.get(`RP${req.params.token}`);
+  if (!userID) return next(new ErrorResponse('Token is not valid', 401));
+
+  const user = await AuthModel.findById(userID);
+  if (!user) return next(new ErrorResponse('User not Found!! ', 404));
+
   await user.save();
-  return res.status(200).json({ success: true, token });
+  return res.status(200).json({
+    success: true,
+    token
+  });
 });
 
 exports.resetPassword = asyncHandler(async (req, res, next) => {
   const { error } = resetPasswordVal(req.body);
   if (error) return next(new ErrorResponse(error.details[0].message, 400));
 
-  const user = await AuthModel.findOne({
-    resetPasswordToken: req.params.token,
-    resetPasswordExpire: { $gt: Date.now() }
-  });
-  user.resetPasswordToken = undefined;
-  user.resetPasswordExpire = undefined;
-  user.isAccountVerified = true;
+  const userID = await redis.get(`RP${req.params.token}`);
+  if (!userID) return next(new ErrorResponse('Token is not valid', 401));
 
+  const user = await AuthModel.findById(userID);
+  if (!user) return next(new ErrorResponse('User not Found!! ', 404));
+
+  await redis.del(`RP${req.params.token}`);
+
+  user.isAccountVerified = true;
   user.password = await bcrypt.hash(req.body.password, 10);
   await user.save();
-  return res.status(200).json({ success: true });
+  return res.status(200).json({
+    success: true
+  });
 });
 
 exports.createNewPassword = asyncHandler(async (req, res, next) => {
@@ -176,7 +184,7 @@ exports.updateDetails = asyncHandler(async (req, res, next) => {
     new: true
   });
 
-  res.status(200).json({ success: true, user });
+  return res.status(200).json({ success: true, user });
 });
 
 exports.deactivateAccount = asyncHandler(async (req, res, next) => {
@@ -231,8 +239,19 @@ exports.logout = asyncHandler(async (req, res, next) => {
   }
   const decodedAT = await jwt.verify(accessToken, config.jwtAccessKey);
   const decodedRT = await jwt.verify(refreshToken, config.jwtRefreshKey);
-  const timeAT = decodedAT.exp * 1000 - Date.now() + 1;
-  const timeRT = decodedRT.exp * 1000 - Date.now() + 1;
+
+  const timeAT =
+    decodedAT.exp * 1000 +
+    new Date(decodedAT.exp * 1000).getTimezoneOffset() * 60 * 1000 -
+    (Date.now() + new Date(Date.now()).getTimezoneOffset() * 60 * 1000) +
+    1;
+
+  const timeRT =
+    decodedRT.exp * 1000 +
+    new Date(decodedRT.exp * 1000).getTimezoneOffset() * 60 * 1000 -
+    (Date.now() + new Date(Date.now()).getTimezoneOffset() * 60 * 1000) +
+    1;
+
   await redis.set(`BlackListed${refreshToken}`, accessToken, 'PX', timeAT);
   await redis.set(`BlackListed${accessToken}`, refreshToken, 'PX', timeRT);
   return res.status(200).json({ success: true });
